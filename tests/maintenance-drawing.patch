@@ -1,0 +1,47 @@
+--- a/tests/phone-ui.test.mjs
++++ b/tests/phone-ui.test.mjs
+@@ -1059,7 +1059,7 @@
+  }finally{await f.cleanup();}
+ });
+ 
+-test('drawing engines: the drawing app switches between NovelAI, GPT and ComfyUI; the engine cards hold GPT key and ComfyUI address, models and workflow',async()=>{
++test('drawing engines: the drawing app switches between NovelAI, GPT and ComfyUI; the engine cards hold connections and drawing owns workflows and draft parameters',async()=>{
+  const f=await fixture();try{
+   const png=Buffer.from([0x89,0x50,0x4e,0x47,1,2,3]).toString('base64'),sent=[];
+   f.backend.imageFetch=async(url,init={})=>{sent.push({url,body:init.body?JSON.parse(init.body):null});
+@@ -1095,20 +1095,23 @@
+   f.click('[data-app=engines] [data-action=engine][data-engine=comfy]');f.click('[data-app=engines] [data-action=engine][data-engine=comfy]');
+   await until(()=>f.d.querySelector('[data-app=engines] [data-action=comfy-test]'));
+   f.click('[data-app=engines] [data-action=use-draw-engine][data-engine=comfy]');assert.equal(f.api.getState().draw.engine,'comfy');
+-  f.click('[data-app=engines] [data-action=comfy-test]');await until(()=>f.d.querySelector('[data-app=engines] select[data-field=comfy-model]'));
+-  f.set('[data-app=engines] select[data-field=comfy-model]','anime.safetensors','change');assert.equal(f.api.getState().draw.comfy.model,'anime.safetensors');
+-  assert.equal(f.d.querySelector('[data-app=engines] [data-field=comfy-workflow]'),null,'workflow JSON is imported, not pasted');
+-  assert.equal(f.d.querySelector('[data-app=engines] [data-action=save-comfy-wf]'),null);
++  f.click('[data-app=engines] [data-action=comfy-test]');await until(()=>/连接正常/.test(f.q('[data-app=engines].view').textContent));
++  assert.equal(f.d.querySelector('[data-app=engines] [data-field=comfy-model]'),null);
++  assert.equal(f.d.querySelector('[data-app=engines] [data-comfy-file]'),null);
++  f.app.open('draw');await until(()=>f.d.querySelector('[data-app=draw] [data-tab=lora]'));
++  f.click('[data-app=draw] [data-tab=lora]');await until(()=>f.d.querySelector('[data-app=draw] [data-action=comfy-manage]'));
++  f.click('[data-app=draw] [data-action=comfy-manage]');await until(()=>f.d.querySelector('.sheet [data-comfy-file]'));
+   const badWf=new Blob(['{"nodes":[],"links":[]}'],{type:'application/json'});Object.defineProperty(badWf,'name',{value:'错误格式.json'});
+-  const badPick=f.q('[data-app=engines] [data-comfy-file]');Object.defineProperty(badPick,'files',{configurable:true,value:[badWf]});badPick.dispatchEvent(new f.w.Event('change',{bubbles:true}));await tick();
++  const badPick=f.q('.sheet [data-comfy-file]');Object.defineProperty(badPick,'files',{configurable:true,value:[badWf]});badPick.dispatchEvent(new f.w.Event('change',{bubbles:true}));await tick();
+   assert.equal(f.api.getState().draw.comfy.workflow,'','a UI-format workflow is refused');
+-  const wfFile=new Blob([JSON.stringify({1:{class_type:'CLIPTextEncode',inputs:{text:'%prompt%'}},2:{class_type:'CheckpointLoaderSimple',inputs:{ckpt_name:'%model%'}}})],{type:'application/json'});Object.defineProperty(wfFile,'name',{value:'我的工作流.json'});
+-  const wfPick=f.q('[data-app=engines] [data-comfy-file]');Object.defineProperty(wfPick,'files',{configurable:true,value:[wfFile]});wfPick.dispatchEvent(new f.w.Event('change',{bubbles:true}));
+-  await until(()=>/%prompt%/.test(f.api.getState().draw.comfy.workflow));
+-  f.api.selectComfyWorkflow('default');
+-  f.app.open('draw');await until(()=>f.d.querySelector('[data-app=draw] [data-action=draw-engine][data-pick=comfy][aria-pressed=true]'));
+-  f.click('[data-app=draw] [data-action=tab][data-tab=params]');await until(()=>f.d.querySelector('[data-app=draw] [data-action=comfy-size][data-size=landscape]'));
+-  f.click('[data-app=draw] [data-action=comfy-size][data-size=landscape]');assert.deepEqual([f.api.getState().draw.comfy.width,f.api.getState().draw.comfy.height],[1216,832]);
++  f.click('.sheet [data-sheet-close]');
++  f.click('[data-app=draw] [data-action=tab][data-tab=params]');await until(()=>f.d.querySelector('[data-app=draw] [data-action=comfy-read]'));
++  f.click('[data-app=draw] [data-action=comfy-read]');await until(()=>f.d.querySelector('[data-app=draw] select[data-field=comfy-model]'));
++  f.set('[data-app=draw] select[data-field=comfy-model]','anime.safetensors','change');
++  assert.equal(f.api.getComfyDraft().value.model,'anime.safetensors');assert.equal(f.api.getState().draw.comfy.model,'');
++  await tick();f.click('[data-app=draw] [data-action=comfy-size][data-size=landscape]');await tick();
++  assert.deepEqual([f.api.getComfyDraft().value.width,f.api.getComfyDraft().value.height],[1216,832]);
++  f.app.open('engines');f.app.open('draw');await tick();assert.equal(f.api.getComfyDraft().value.width,1216,'navigation preserves draft');
+   f.click('[data-app=draw] [data-action=tab][data-tab=prompt]');await until(()=>f.d.querySelector('[data-app=draw] [data-field=negative]'));
+   f.set('[data-app=draw] [data-field=prompt]','1girl, {smile}');
+   f.click('[data-app=draw] [data-action=generate]');await until(async()=>(await f.api.listPhotos()).length===2);

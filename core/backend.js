@@ -10,7 +10,9 @@ import { normalizeSync, runSync, SYNC_PARTS } from './sync.js';
 import { decodeMono, encodeWav } from './audio-join.js';
 import { BACKUP_PARTS, PART_STORES, writeBackup, readBackup, sealKeys, openKeys } from './backup.js';
 import { WALLET_LIMITS, PREMIUM, DECOR_KINDS, SHOP_GIFTS, LEDGER_KINDS, premiumOf, decorKey, cents, yuan, shopGifts, normalizeGift, validateGift } from './wallet.js';
-import { DRAW_ENGINES, DRAW_ENGINE_NAMES, GPT_IMAGE_MODELS, GPT_QUALITIES, normalizeGpt, gptBase, gptSize, gptPrompt, gptGenerate, normalizeComfy, comfyUrl, checkWorkflow, comfySize, comfyPrompt, comfyValues, fillWorkflow, comfyGenerate, comfyCatalog, tavernWorkflows, tavernWorkflow, orientationOf, DEFAULT_COMFY_WORKFLOW } from './image-engines.js';
+import { DRAW_ENGINES, DRAW_ENGINE_NAMES, GPT_IMAGE_MODELS, GPT_QUALITIES, normalizeGpt, gptBase, gptSize, gptPrompt, gptGenerate, normalizeComfy, comfyUrl, checkWorkflow, comfySize, comfyPrompt, comfyValues, fillWorkflow, comfyGenerate, comfyCatalog, comfyLoras, tavernWorkflows, tavernWorkflow, orientationOf, DEFAULT_COMFY_WORKFLOW, COMFY_PARAM_KEYS, applyComfyWorkflow } from './image-engines.js';
+import {activeLoraWorkflow, normalizeDisabledLoras} from './comfy-loras.js';
+import {patchComfyDraft, describeComfyDraft} from './comfy-draft.js';
 import { normalizeSettings, validateSettings, modelRules, freshState } from './state.js';
 import { normalizeRoute, switchRouteEngine, removeRoute } from './routes.js';
 import { DEFAULT_PROMPT, DEFAULT_FORMAT, promptPlan, validatePreset, parseDialogue, isPlaceholderRole, knownFormats } from './protocol.js';
@@ -21,7 +23,7 @@ import { AudioCache } from './cache.js';
 import { DialoguePlayer } from './player.js';
 import { LocalLibrary, PHONE_APPS, PHONE_WALLPAPERS, PHONE_GLYPHS, PHONE_SKINS } from './library.js';
 import { NovelAIClient, relayUrl, FISH_PATHS, NAI_MODELS, NAI_MODEL_NAMES, NAI_SAMPLERS, NAI_SCHEDULES, buildImageRequest, guardParams, isFree, isV5, normalizeDrawParams } from './novelai.js';
-import { PIC_TAG_FORMAT, DEFAULT_DRAW_RULE, DRAW_COUNT_MAX, PRESET_REV as DRAW_PRESET_REV, drawPromptPlan, planRequest, validateDrawPreset, normalizeDraw, defaultDraw, normalizeVibeSettings } from './draw.js';
+import { PIC_TAG_FORMAT, DEFAULT_DRAW_RULE, DRAW_COUNT_MAX, PRESET_REV as DRAW_PRESET_REV, drawPromptPlan, planRequest, validateDrawPreset, normalizeDraw, defaultDraw, normalizeVibeSettings, applyImageConnection } from './draw.js';
 import { defaultChat, normalizeChatPreset, normalizeContact, validateChatPreset, validateContact, chatContacts, inSpace, activeSpace, buildChatRequest, activeChatPreset, normalizeVoiceText, normalizeProfile , normalizeAvatars } from './chat.js';
 import { ChatStore, money } from './chats.js';
 import { DrawQueue } from './draw-queue.js';
@@ -71,6 +73,8 @@ export class TTSBackend {
         this.keyStore = keyStore || new KeyStore(this.settings.scope, { indexedDB, onError: message => this.notify(message) });
         this.novelai = novelai || new NovelAIClient();
         this.textKeys = new Map();
+        this.imageKeys = {nai: new Map(), gpt: new Map()};
+        this.imageConnectionRevision = 0;
         // Saved vibes by id: their summaries (core/vibes.js vibeSummary); the files themselves stay in the library.
         this.vibes = new Map();
         this.chats = chats || new ChatStore(this.settings.scope, { indexedDB });
@@ -104,7 +108,7 @@ export class TTSBackend {
     }
     async initialize() {
         this.assertOpen();
-        try { await this.keyStore.open?.(); for (const [engine, key] of this.keyStore.load()) { if (engine === 'nai') this.novelai.setKey(key); else if (engine === 'gpt') this.gptKey = key; else if (engine === 'llm') this.textKeys = parseTextKeys(key); else this.providers.setKey(engine, key); } }
+        try { await this.keyStore.open?.(); for (const [engine, key] of this.keyStore.load()) { if (engine === 'nai' || engine === 'gpt') this.imageKeys[engine] = parseTextKeys(key); else if (engine === 'llm') this.textKeys = parseTextKeys(key); else this.providers.setKey(engine, key); } this.activateImageKeys(); }
         catch (error) { this.notify(error.message); }
         try {
             const phone = await this.library.getPhone();
@@ -221,9 +225,12 @@ export class TTSBackend {
             for (const [engine, connection] of Object.entries(copy.connections)) modelCheck(engine, connection.model);
             validateSettings(copy);
         } catch (error) { throw Error(message(error)); }
+        const imageChanged = JSON.stringify([copy.draw.connections, copy.draw.engine]) !== JSON.stringify([this.settings.draw.connections, this.settings.draw.engine]);
+        if (imageChanged) this.assertImageIdle();
         // The host callback completes before the service acknowledges a new settings revision.
         this.persist(clone(copy));
         this.settings = copy;
+        if (imageChanged) this.activateImageKeys();
         this.revision++;
         this.emit('settings', { state: this.getState() });
         return this.getState();
@@ -305,8 +312,13 @@ export class TTSBackend {
         keyCheck(engine); if (!String(key).trim()) throw Error('请填写密钥，或使用清除密钥');
         // The text model: a stored list (from a backup) replaces every preset's key; a plain key is the active preset's.
         if (engine === 'llm') { if (String(key).includes('\t')) this.storeTextKeys(parseTextKeys(key)); else this.setTextKey(this.settings.text.active, key); return; }
+        if (engine === 'nai' || engine === 'gpt') {
+            this.assertImageIdle();
+            const map = String(key).includes('\t') ? parseTextKeys(key) : new Map(this.imageKeys[engine]).set(this.settings.draw.connections[engine].active, validateKey(engine, key));
+            this.storeImageKeys(engine, map); return;
+        }
         const saved = this.keyStore.save(engine, key);
-        if (engine === 'nai') { this.novelai.setKey(saved); this.subscription = null; } else if (engine === 'gpt') this.gptKey = saved; else { this.providers.setKey(engine, saved); this.balances.delete(engine); }
+        this.providers.setKey(engine, saved); this.balances.delete(engine);
         this.emit('keys', { engine, configured: true });
     }
     /** Voice engines keep several keys: new ones are added after those saved (repeats once). Returns how many were new. */
@@ -356,8 +368,9 @@ export class TTSBackend {
     clearKey(engine) {
         keyCheck(engine);
         if (engine === 'llm') { this.clearTextKey(this.settings.text.active); return; }
+        if (engine === 'nai' || engine === 'gpt') { this.assertImageIdle(); const map = new Map(this.imageKeys[engine]); map.delete(this.settings.draw.connections[engine].active); this.storeImageKeys(engine, map); return; }
         this.keyStore.save(engine, '');
-        if (engine === 'nai') { this.novelai.setKey(''); this.subscription = null; } else if (engine === 'gpt') this.gptKey = ''; else { this.providers.setKey(engine, ''); this.balances.delete(engine); }
+        this.providers.setKey(engine, ''); this.balances.delete(engine);
         this.emit('keys', { engine, configured: false });
     }
     /** What is left on a voice account (ElevenLabs credits, Fish API balance); null without a key. Cached for a minute. */
@@ -373,7 +386,7 @@ export class TTSBackend {
         return clone(value);
     }
     /** The last 4 characters of the saved key ('' without one), so the user can tell which key is in use. */
-    keyHint(engine) { keyCheck(engine); if (engine === 'gpt') return keyTail(this.gptKey); if (engine !== 'nai' && engine !== 'llm') return keyTail(this.providers.currentKey(engine)); if (engine === 'llm') return this.textKeyHint(this.settings.text.active); try { return keyTail(this.keyStore.load().get(engine) || ''); } catch { return ''; } }
+    keyHint(engine) { keyCheck(engine); if (engine === 'nai' || engine === 'gpt') return keyTail(this.imageKeys[engine].get(this.settings.draw.connections[engine].active)); if (engine === 'llm') return this.textKeyHint(this.settings.text.active); return keyTail(this.providers.currentKey(engine)); }
     /** For a voice engine with keys: how many, which one is in use (1-based) and how many were refused while this page is open. */
     keyPool(engine) { engineCheck(engine); return this.providers.keyPool(engine); }
     keyStatus(engine) { keyCheck(engine); return engine === 'nai' ? this.novelai.configured : engine === 'gpt' ? !!this.gptKey : engine === 'llm' ? this.textKeys.has(this.settings.text.active) : this.providers.keys.has(engine); }
@@ -606,6 +619,133 @@ export class TTSBackend {
     textModels(draft) { const text = activeText(this.textWith(draft)); return listModels({ text, key: this.textKeys.get(text.id) || '' }); }
 
     // ---------- Drawing ----------
+    assertImageIdle() { this.assertOpen(); if (this.drawQueue.pending) throw Error('还有图片正在生成或排队，请等完成或取消队列后再换生图引擎或账号连接'); }
+    activateImageKeys() {
+        this.novelai.setKey(this.imageKeys.nai.get(this.settings.draw.connections.nai.active) || '');
+        this.novelai.relay = this.settings.draw.relay.url;
+        this.gptKey = this.imageKeys.gpt.get(this.settings.draw.connections.gpt.active) || '';
+        this.subscription = null;
+        this.imageConnectionRevision++;
+    }
+    storeImageKeys(engine, map) {
+        this.keyStore.save(engine, joinTextKeys(map));
+        this.imageKeys[engine] = map;
+        this.activateImageKeys();
+        this.emit('keys', {engine, configured: this.keyStatus(engine)});
+    }
+    commitImageConnection(next, engine, map) {
+        // Validate before either store is touched. A synchronous key-storage failure must not leave a new
+        // address paired with the previous secret; a host persistence failure restores the previous keys.
+        validateSettings(normalizeSettings(next));
+        const before = this.imageKeys[engine];
+        this.keyStore.save(engine, joinTextKeys(map));
+        this.imageKeys[engine] = map;
+        try { this.save(next); }
+        catch (error) { this.imageKeys[engine] = before; this.keyStore.save(engine, joinTextKeys(before)); throw error; }
+        this.activateImageKeys();
+        this.emit('keys', {engine, configured: this.keyStatus(engine)});
+    }
+    imageConnectionList(engine) {
+        if (!['nai', 'gpt'].includes(engine)) throw Error('生图引擎无效');
+        const group = this.settings.draw.connections[engine];
+        return group.presets.map(p => ({...clone(p), current: p.id === group.active, configured: this.imageKeys[engine].has(p.id), tail: keyTail(this.imageKeys[engine].get(p.id))}));
+    }
+    /** Missing id creates and selects an empty connection; a blank key keeps its saved key. */
+    saveImageConnection(engine, patch = {}) {
+        this.imageConnectionList(engine); this.assertImageIdle();
+        const next = this.getState(), group = next.draw.connections[engine];
+        const id = patch.id || crypto.randomUUID(), old = group.presets.find(p => p.id === id);
+        if (patch.id && !old) throw Error('这组生图连接已经不在了');
+        const name = String(patch.name ?? old?.name ?? `连接 ${group.presets.length + 1}`).trim();
+        if (!name || name.length > 60) throw Error('请填写连接名称（最多 60 字）');
+        const url = (engine === 'nai' ? relayUrl : gptBase)(patch.url ?? old?.url ?? '');
+        const item = {id, name, url};
+        if (engine === 'nai') item.assumeOpus = patch.assumeOpus ?? old?.assumeOpus ?? false;
+        else { item.model = String(patch.model ?? old?.model ?? 'gpt-image-1').trim(); if (!/^[\w.:/-]{1,80}$/.test(item.model)) throw Error('模型名称无效'); }
+        const typed = String(patch.key ?? '').trim();
+        // The public editing API accepts one key, never the internal backup representation.
+        if (typed.includes('\t') || typed.includes('\n')) throw Error('每组连接请填写一个密钥');
+        const key = typed ? validateKey(engine, typed) : '';
+        if (old) group.presets[group.presets.indexOf(old)] = item; else group.presets.push(item);
+        group.active = id; applyImageConnection(next.draw, engine);
+        const map = new Map(this.imageKeys[engine]);
+        if (key) map.set(id, key);
+        this.commitImageConnection(next, engine, map);
+        return this.imageConnectionList(engine).find(p => p.id === id);
+    }
+    selectImageConnection(engine, id) {
+        if (!this.imageConnectionList(engine).some(p => p.id === id)) throw Error('这组生图连接已经不在了');
+        const next = this.getState(); next.draw.connections[engine].active = id;
+        applyImageConnection(next.draw, engine); this.save(next);
+    }
+    deleteImageConnection(engine, id) {
+        const list = this.imageConnectionList(engine);
+        if (!list.some(p => p.id === id)) throw Error('这组生图连接已经不在了');
+        if (list.length < 2) throw Error('请至少保留一组生图连接');
+        this.assertImageIdle();
+        const next = this.getState(), group = next.draw.connections[engine];
+        group.presets = group.presets.filter(p => p.id !== id);
+        if (group.active === id) group.active = group.presets[0].id;
+        applyImageConnection(next.draw, engine);
+        const map = new Map(this.imageKeys[engine]); map.delete(id); this.commitImageConnection(next, engine, map);
+    }
+    /** Draft survives app navigation, but is never included in backups or automatic pictures. */
+    getComfyDraft() {
+        const c = this.settings.draw.comfy, selected = c.workflows.find(p => p.id === c.activeWorkflow);
+        if (!this.comfyEdit || JSON.stringify(this.comfyEdit.value) === JSON.stringify(this.comfyEdit.base)) {
+            this.comfyEdit = {base: clone(selected), value: clone(selected)};
+        }
+        const current = c.workflows.find(p => p.id === this.comfyEdit.base.id);
+        return clone(describeComfyDraft(this.comfyEdit, current));
+    }
+    updateComfyDraft(patch, expected) {
+        const draft = this.getComfyDraft();
+        if (expected && JSON.stringify(expected) !== JSON.stringify(draft.value)) throw Error('草稿已经改变，请重新打开 LoRA 面板');
+        this.comfyEdit.value = patchComfyDraft(draft.value, patch);
+        return this.getComfyDraft();
+    }
+    resetComfyDraft() { this.comfyEdit = null; return this.getComfyDraft(); }
+    saveComfyDraft({name, copy = false} = {}) {
+        const {value, base} = this.getComfyDraft();
+        const saved = this.saveComfyWorkflow({...(copy || base.id === 'default' ? {} : {id: base.id, expected: base}),
+            name: name ?? value.name, workflow: value.workflow || DEFAULT_COMFY_WORKFLOW,
+            sourceWorkflow: value.sourceWorkflow || base.workflow || DEFAULT_COMFY_WORKFLOW,
+            disabledLoras: value.disabledLoras, params: value});
+        this.resetComfyDraft();
+        return saved;
+    }
+    /** Import a new workflow or rename/update a saved one. LoRA nodes and custom inputs stay untouched. */
+    saveComfyWorkflow(patch) {
+        if (!patch || typeof patch !== 'object') throw Error('工作流格式无效');
+        const next = this.getState(), c = next.draw.comfy, old = c.workflows.find(p => p.id === patch.id);
+        if (patch.id === 'default') throw Error('默认工作流不能修改，请导入为新的一套');
+        if (patch.id && !old) throw Error('这套工作流已经不在了');
+        if (old && patch.expected && Object.entries(patch.expected).some(([key, value]) => JSON.stringify(old[key]) !== JSON.stringify(value))) throw Error('这套方案在其他地方改过了，请另存，或重新选择方案后再改');
+        let name = String(patch.name ?? old?.name ?? '').trim();
+        if (!name || name.length > 60) throw Error('请填写工作流名称（最多 60 字）');
+        const workflow = checkWorkflow(patch.workflow ?? old?.workflow);
+        if (!workflow) throw Error('导入的工作流不能为空');
+        if (!old) { const stem = name; let n = 2; while (c.workflows.some(p => p.name === name)) name = stem.slice(0, 54) + ` (${n++})`; }
+        const disabledLoras = normalizeDisabledLoras(workflow, patch.disabledLoras ?? old?.disabledLoras);
+        // Validate bypass wiring before acknowledging a saved scheme.
+        activeLoraWorkflow(workflow, disabledLoras);
+        const sourceWorkflow = checkWorkflow(patch.sourceWorkflow ?? old?.sourceWorkflow);
+        const row = {id: old?.id || crypto.randomUUID(), name, workflow, disabledLoras, ...(sourceWorkflow ? {sourceWorkflow} : {}), ...Object.fromEntries(COMFY_PARAM_KEYS.map(key => [key, patch.params?.[key] ?? (old || c)[key]]))};
+        if (old) c.workflows[c.workflows.indexOf(old)] = row; else c.workflows.push(row);
+        applyComfyWorkflow(c, row.id); this.save(next);
+        return clone(this.settings.draw.comfy.workflows.find(p => p.id === row.id));
+    }
+    selectComfyWorkflow(id) {
+        const next = this.getState(); applyComfyWorkflow(next.draw.comfy, id); this.save(next);
+    }
+    deleteComfyWorkflow(id) {
+        if (id === 'default') throw Error('默认工作流需要保留');
+        const next = this.getState(), c = next.draw.comfy;
+        if (!c.workflows.some(p => p.id === id)) throw Error('这套工作流已经不在了');
+        c.workflows = c.workflows.filter(p => p.id !== id);
+        if (c.activeWorkflow === id) applyComfyWorkflow(c, 'default');
+        this.save(next);
+    }
     saveDraw(patch) {
         if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw Error('绘图设置格式无效');
         const next = this.getState(), draw = next.draw;
@@ -629,12 +769,25 @@ export class TTSBackend {
         if ('comfy' in patch) {
             const c = patch.comfy && typeof patch.comfy === 'object' ? clone(patch.comfy) : {};
             if ('url' in c) c.url = comfyUrl(c.url);
-            if ('workflow' in c) c.workflow = checkWorkflow(c.workflow);
-            draw.comfy = normalizeComfy({ ...draw.comfy, ...c });
+            const current = draw.comfy;
+            if ('workflow' in c) {
+                c.workflow = checkWorkflow(c.workflow);
+                if (!c.workflow) applyComfyWorkflow(current, 'default');
+                else if (current.activeWorkflow === 'default') {
+                    const row = {id: crypto.randomUUID(), name: '自定义工作流', workflow: c.workflow, ...Object.fromEntries(COMFY_PARAM_KEYS.map(key => [key, current[key]]))};
+                    current.workflows.push(row); applyComfyWorkflow(current, row.id);
+                } else { const row = current.workflows.find(p => p.id === current.activeWorkflow); row.workflow = c.workflow; row.disabledLoras = []; delete row.sourceWorkflow; }
+            }
+            draw.comfy = normalizeComfy({ ...current, ...c });
         }
         // The 画风 picked belongs to the engine in use.
         if ('activeStyle' in patch) { if (!draw.styles.some(s => s.id === patch.activeStyle)) throw Error('画风预设不存在'); if (draw.engine === 'nai') draw.activeStyle = patch.activeStyle; else draw[draw.engine].style = patch.activeStyle; }
         if ('activePreset' in patch) { if (!draw.presets.some(p => p.id === patch.activePreset)) throw Error('绘图预设不存在'); draw.activePreset = patch.activePreset; }
+        // Existing address/model controls edit the selected connection, preserving every other one.
+        for (const engine of ['nai', 'gpt']) {
+            const group = draw.connections[engine], p = group.presets.find(p => p.id === group.active);
+            Object.assign(p, engine === 'nai' ? draw.relay : {url: draw.gpt.url, model: draw.gpt.model});
+        }
         this.save(next);
         return clone(this.settings.draw);
     }
@@ -682,7 +835,9 @@ export class TTSBackend {
         if (!this.novelai.configured) return null;
         if (!refresh && this.subscription && Date.now() - this.subscription.checkedAt < 10 * 60 * 1000) return clone(this.subscription);
         this.novelai.relay = this.settings.draw.relay.url;
-        this.subscription = await this.novelai.subscription();
+        const revision = this.imageConnectionRevision, subscription = await this.novelai.subscription();
+        if (revision !== this.imageConnectionRevision) return null;
+        this.subscription = subscription;
         this.emit('draw', { subscription: this.subscription });
         return clone(this.subscription);
     }
@@ -701,9 +856,9 @@ export class TTSBackend {
         return { relay: !!this.settings.draw.relay.url, draw, subscription };
     }
     /** Whether params cost Anlas. free: true (covered), false (costs Anlas), null (subscription unknown). */
-    drawQuote(params) {
+    drawQuote(params, useComfyDraft = false) {
         const engine = this.settings.draw.engine;
-        if (engine !== 'nai') return this.engineQuote(engine, params);
+        if (engine !== 'nai') return this.engineQuote(engine, params, useComfyDraft ? this.getComfyDraft().value : undefined);
         const requested = normalizeDrawParams(params || this.settings.draw.params);
         const effective = this.settings.draw.guard ? guardParams(requested) : requested;
         // Through a relay that does not pass the subscription on, the user may say the account is Opus: small non-V5 images count as free.
@@ -854,14 +1009,14 @@ export class TTSBackend {
         return list;
     }
     /** GPT and ComfyUI: GPT costs money on every picture (asked first unless 每张先问 is off); ComfyUI is the user's own. */
-    engineQuote(engine, params) {
+    engineQuote(engine, params, comfy) {
         const draw = this.settings.draw, orientation = orientationOf(Number(params?.width), Number(params?.height));
         const none = { on: false, model: false, used: [], skipped: [], over: 0, encode: 0, extra: 0 };
         if (engine === 'gpt') {
             const size = gptSize(draw.gpt.model, orientation || draw.gpt.orientation), [width, height] = size.split('x').map(Number);
             return { engine, params: { model: draw.gpt.model, width, height, seed: -1 }, clamped: false, free: draw.gpt.ask ? false : true, paid: true, guard: false, v5: false, usage: null, vibes: none, vibeAnlas: 0 };
         }
-        const c = draw.comfy, size = comfySize(c, orientation || orientationOf(c.width, c.height));
+        const c = comfy || draw.comfy, size = comfySize(c, orientation || orientationOf(c.width, c.height));
         return { engine, params: { model: c.model, ...size, steps: c.steps, scale: c.scale, sampler: c.sampler, seed: Number.isInteger(params?.seed) && params.seed >= 0 ? params.seed : -1 }, clamped: false, free: true, guard: false, v5: false, usage: null, vibes: none, vibeAnlas: 0 };
     }
     /** Whether pictures can be drawn with the engine in use; drawMissing() says what is missing. */
@@ -871,36 +1026,40 @@ export class TTSBackend {
     drawMissing() { const engine = this.settings.draw.engine; return this.drawReady() ? '' : engine === 'gpt' ? '还没有填写 GPT 生图的密钥' : engine === 'comfy' ? '还没有填写 ComfyUI 地址' : '还没有填写 NovelAI 密钥'; }
     /** ComfyUI: connection check and what it offers (models, samplers, schedulers). url: an address not saved yet. */
     async comfyCatalog(url) { this.assertOpen(); return comfyCatalog({ fetch: this.imageFetch, headers: this.tavernHeaders(), url: comfyUrl(url ?? this.settings.draw.comfy.url) }); }
+    async comfyLoras({transport, signal} = {}) { this.assertOpen(); const c = this.settings.draw.comfy; return comfyLoras({fetch: this.imageFetch, url: c.url, transport: transport ?? c.loraTransport, signal}); }
     async comfyWorkflows() { this.assertOpen(); return tavernWorkflows({ fetch: this.imageFetch, headers: this.tavernHeaders() }); }
     async comfyWorkflow(name) { this.assertOpen(); return tavernWorkflow({ fetch: this.imageFetch, headers: this.tavernHeaders(), name: String(name || '') }); }
     /** Draws with GPT or ComfyUI. Inputs are the NovelAI-shaped picture (scene prompt, one caption per person). */
-    async drawWithEngine(engine, { prompt, negative, characters, quote, signal }) {
+    async drawWithEngine(engine, { prompt, negative, characters, quote, signal, comfy }) {
         const draw = this.settings.draw, p = quote.params;
         if (engine === 'gpt') {
             const text = gptPrompt({ prompt, characters });
             const blob = await gptGenerate({ fetch: this.imageFetch, settings: draw.gpt, key: this.gptKey, prompt: text, size: `${p.width}x${p.height}`, signal });
             return { blob, seed: -1, params: { model: draw.gpt.model, width: p.width, height: p.height }, prompt: text };
         }
-        const c = draw.comfy, seed = p.seed >= 0 ? p.seed : Math.floor(Math.random() * 4294967295);
+        const c = comfy || draw.comfy, seed = p.seed >= 0 ? p.seed : Math.floor(Math.random() * 4294967295);
         const text = comfyPrompt({ prompt, negative, characters });
-        const workflow = fillWorkflow(c.workflow, comfyValues(c, { prompt: text.prompt, negative: text.negative, width: p.width, height: p.height, seed }));
+        const workflow = fillWorkflow(activeLoraWorkflow(c.workflow || DEFAULT_COMFY_WORKFLOW, c.disabledLoras), comfyValues(c, { prompt: text.prompt, negative: text.negative, width: p.width, height: p.height, seed }));
         const blob = await comfyGenerate({ fetch: this.imageFetch, headers: this.tavernHeaders(), url: c.url, workflow, signal });
         return { blob, seed, params: { model: c.model || '工作流', width: p.width, height: p.height, steps: c.steps, scale: c.scale, sampler: c.sampler }, prompt: text.prompt };
     }
     /** Generates one image and keeps it in the album. Requests wait in the NovelAI queue (see draw-queue.js).
      *  key identifies the job in the queue (the same key joins the job already waiting); label is shown in the line. */
-    generateImage({ prompt, negative = '', characters = [], params, allowPaid = false, name = '', key, label = '' } = {}) {
+    generateImage({ prompt, negative = '', characters = [], params, allowPaid = false, name = '', key, label = '', useComfyDraft = false } = {}) {
         this.assertOpen();
         if (!String(prompt || '').trim()) return Promise.reject(Error('请先写提示词'));
         const engine = this.settings.draw.engine;
         if (!this.drawReady()) return Promise.reject(Error(this.drawMissing()));
-        const quote = this.drawQuote(params);
+        const quote = this.drawQuote(params, useComfyDraft);
         if (engine !== 'nai') {
             if (quote.free === false && !allowPaid) return Promise.reject(Object.assign(Error('GPT 生图每张都要花钱，需要确认后再生成'), { code: 'PAID' }));
+            const c = useComfyDraft && engine === 'comfy' ? {...this.settings.draw.comfy, ...this.getComfyDraft().value} : this.settings.draw.comfy;
+            const comfy = engine === 'comfy' ? clone(Object.fromEntries(['url', 'workflow', 'disabledLoras', ...COMFY_PARAM_KEYS].map(k => [k, c[k]]))) : undefined;
+            const picture = {prompt, negative, characters: clone(characters), quote, comfy};
             const job = this.drawQueue.add({ key, label: label || String(prompt).slice(0, 40), task: async signal => {
                 this.assertOpen();
                 this.emit('draw', { phase: 'generating' });
-                const made = await this.drawWithEngine(engine, { prompt, negative, characters, quote, signal });
+                const made = await this.drawWithEngine(engine, { ...picture, signal });
                 this.assertOpen();
                 const ext = made.blob.type === 'image/jpeg' ? 'jpg' : made.blob.type === 'image/webp' ? 'webp' : 'png';
                 const photo = await this.library.addPhoto({ name: (name || DRAW_ENGINE_NAMES[engine]) + '-' + (made.seed >= 0 ? made.seed : Date.now()) + '.' + ext, blob: made.blob });
@@ -1275,10 +1434,14 @@ export class TTSBackend {
             previewPrompt: preset => this.previewPrompt(preset), promptPlan: () => clone(promptPlan(this.settings, modelRules(this.settings))), parse: text => this.parse(text),
             voiceBalance: (engine, refresh) => this.voiceBalance(engine, refresh), keyStatus: engine => this.keyStatus(engine), keyHint: engine => this.keyHint(engine), keyPool: engine => this.keyPool(engine), keyList: engine => this.keyList(engine), addKeys: (engine, value) => this.addKeys(engine, value), removeKey: (engine, index) => this.removeKey(engine, index), useKey: (engine, index) => this.useKey(engine, index), setKey: (engine, key) => this.setKey(engine, key), clearKey: engine => this.clearKey(engine),
             saveDraw: patch => this.saveDraw(patch), saveStyle: style => this.saveStyle(style), deleteStyle: id => this.deleteStyle(id),
+            imageConnectionList: engine => this.imageConnectionList(engine), saveImageConnection: (engine, patch) => this.saveImageConnection(engine, patch), selectImageConnection: (engine, id) => this.selectImageConnection(engine, id), deleteImageConnection: (engine, id) => this.deleteImageConnection(engine, id),
             drawReady: () => this.drawReady(), drawMissing: () => this.drawMissing(), paidPrompt: () => this.paidPrompt(), comfyCatalog: url => this.comfyCatalog(url), comfyWorkflows: () => this.comfyWorkflows(), comfyWorkflow: name => this.comfyWorkflow(name),
+            saveComfyWorkflow: patch => this.saveComfyWorkflow(patch), selectComfyWorkflow: id => this.selectComfyWorkflow(id), deleteComfyWorkflow: id => this.deleteComfyWorkflow(id),
+            getComfyDraft: () => this.getComfyDraft(), updateComfyDraft: (patch, expected) => this.updateComfyDraft(patch, expected), resetComfyDraft: () => this.resetComfyDraft(), saveComfyDraft: options => this.saveComfyDraft(options),
+            comfyLoras: options => this.comfyLoras(options),
             saveDrawPreset: preset => this.saveDrawPreset(preset), deleteDrawPreset: id => this.deleteDrawPreset(id), previewDrawPrompt: preset => this.previewDrawPrompt(preset),
             naiSubscription: refresh => this.naiSubscription(refresh), naiProbe: () => this.naiProbe(), fishProbe: () => { this.assertOpen(); keyCheck('fish'); return this.providers.probeFish(clone(this.settings.connections.fish)); },
-            listVibes: () => this.listVibes(), importVibes: (files, options) => this.importVibes(files, clone(options || {})), updateVibe: (id, patch) => this.updateVibe(id, clone(patch || {})), deleteVibe: id => this.deleteVibe(id), deleteVibes: ids => this.deleteVibes([...(ids || [])]), exportVibes: target => this.exportVibes(clone(target || {})), vibePlan: model => clone(this.vibePlan(model || this.settings.draw.params.model)), drawQuote: params => this.drawQuote(params),
+            listVibes: () => this.listVibes(), importVibes: (files, options) => this.importVibes(files, clone(options || {})), updateVibe: (id, patch) => this.updateVibe(id, clone(patch || {})), deleteVibe: id => this.deleteVibe(id), deleteVibes: ids => this.deleteVibes([...(ids || [])]), exportVibes: target => this.exportVibes(clone(target || {})), vibePlan: model => clone(this.vibePlan(model || this.settings.draw.params.model)), drawQuote: (params, useComfyDraft) => this.drawQuote(params, useComfyDraft),
             generateImage: input => this.generateImage(input).then(({ blob, ...result }) => result),
             drawQueue: () => this.drawQueue.list(), cancelDraw: key => this.drawQueue.cancel(key), cancelAllDraws: () => this.drawQueue.cancelAll(),
             cloudQueueError: () => this.drawQueue.remoteError, testCloudQueue: value => this.testCloudQueue(value), newRoomCode: () => newRoomCode(),

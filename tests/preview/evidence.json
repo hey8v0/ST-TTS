@@ -1,0 +1,18 @@
+{
+  "checkedAt": "2026-10-03T14:55:59.854Z",
+  "environment": "Headless Edge, actual phone UI, isolated demo backend and mocked catalogues",
+  "checks": [
+    "Matching empty canvas heights across ComfyUI, NovelAI and GPT: {\"comfy\":360,\"nai\":360,\"gpt\":360}",
+    "Scheme controls only appear inside the LoRA tab",
+    "Pointer drag updates the strength readout and drawing draft",
+    "LoRA applies to draft",
+    "Parameters and LoRA save together",
+    "No horizontal overflow at 320",
+    "No horizontal overflow at 390",
+    "No horizontal overflow at 430",
+    "No horizontal overflow at 768"
+  ],
+  "errors": [],
+  "realSillyTavern": false,
+  "realGeneration": false
+}

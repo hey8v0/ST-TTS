@@ -55,6 +55,7 @@ export class DrawQueue {
     return this.jobs.map(({key, label, state, attempt, until, cloud}, position) => ({key, label, state, attempt, until, position, cloud: cloud || null}));
   }
   get(key) { return this.list().find(j => j.key === key) || null; }
+  get pending() { return this.jobs.some(job => !job.settled); }
   cancel(key) {
     const index = this.jobs.findIndex(j => j.key === key);
     if (index < 0) return false;
@@ -112,6 +113,7 @@ export class DrawQueue {
           const result = await job.task(signal);
           this.storage.set(this.now());
           lease?.release('done');
+          job.settled = true;
           job.resolve(result);
           return;
         } catch (error) {
@@ -126,6 +128,7 @@ export class DrawQueue {
         }
       }
     } catch (error) {
+      job.settled = true;
       job.reject(signal.aborted ? cancelled() : error);
     }
   }

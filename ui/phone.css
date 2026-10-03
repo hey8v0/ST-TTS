@@ -549,6 +549,9 @@ details>div{padding-bottom:10px}
 .vibe-name{font-size:12.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vibe-tile small{font-size:11px;color:var(--ink2)}
 .vibe-blank{display:grid;place-items:center;color:var(--ink2)}
 .vibe-detail{display:grid;place-items:center;margin-bottom:10px}.vibe-detail img,.vibe-detail .vibe-blank{width:min(220px,60%);aspect-ratio:1;border-radius:18px;object-fit:cover;background:var(--card2)}
+.lora-art{gap:4px;align-content:center;color:var(--e-ink,var(--ink2));background:var(--e-soft,var(--card2))!important}.lora-art .icon{width:26px;height:26px}.lora-art b{font-size:11px;letter-spacing:.06em}
+.lora-tile.using{border-color:var(--e,var(--accent));box-shadow:0 0 0 1.5px var(--e,var(--accent)) inset}.lora-tile:focus-visible{outline:2px solid var(--e,var(--accent));outline-offset:2px}
+.lora-detail{gap:10px}.lora-detail .lora-art{width:112px}.lora-detail strong{max-width:100%;overflow-wrap:anywhere;text-align:center;font-size:14px}
 .vibe-item{display:flex;align-items:center;gap:10px;padding:6px 0}.vibe-item+.vibe-item{border-top:1px solid var(--line)}
 .vibe-item>img,.vibe-item>.vibe-blank{width:44px;height:44px;border-radius:12px;object-fit:cover;flex:0 0 auto;background:var(--card2)}
 .vibe-item .grow{flex:1;min-width:0}.vibe-item .meter-label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1269,6 +1272,22 @@ small.peek-draw{cursor:default;color:var(--ink2)}
 .deco.premium{position:relative}
 .deco-price{font-size:10.5px;font-weight:800;color:#c27b00;background:#fff3d1;border-radius:999px;padding:1px 7px}
 :root[data-theme=dark] .deco-price{color:#ffd88a;background:#4a3a1c}
+/* Drawing scheme controls reuse the phone's theme and compact cards. */
+.comfy-plan .row-heading{justify-content:space-between;margin-bottom:8px}
+.comfy-plan .row-heading strong{display:flex;align-items:center;gap:4px}
+.comfy-plan>.select{display:block}
+.comfy-plan-actions{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap}
+.comfy-plan-actions .chip-button{flex:1;justify-content:center;min-height:36px;padding:6px 8px;white-space:nowrap}
+.comfy-plan-actions .icon{width:17px;height:17px}
+.comfy-plan .save-state{margin-left:auto;white-space:nowrap}
+.comfy-note{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:8px 0}
+.comfy-note.error-copy{color:var(--danger)}
+.comfy-strengths{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.comfy-strengths:empty{display:none}
+.lora-strengths .field[hidden]{display:none}
+.comfy-import{display:flex;gap:8px;flex-wrap:wrap}
+.comfy-confirm{border:1px solid var(--line)}
+.comfy-confirm p{margin:0}
 .shop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;margin:0 0 6px}
 .shop-deco{min-width:0;padding:10px 6px;background:var(--card);border-radius:16px;box-shadow:inset 0 0 0 1px var(--line)}
 .shop-deco .deco-sample{width:64px;height:38px}

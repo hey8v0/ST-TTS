@@ -12,12 +12,12 @@ export function cleanKey(value){
 // Engines that take several keys, one per line: when one is refused or used up, the next one is used (core/providers.js).
 export const MULTI_KEY=new Set(['fish','mini','eleven','mimo']);
 function checkKey(key){if(key.length>4096)throw Error('密钥格式无效');if(/[^\x21-\x7E]/.test(key))throw Error('密钥里有不是英文字母、数字或符号的字，请回到官网重新复制一次');return key;}
-// The text model keeps one key per connection preset: lines of "<preset id><tab><key>". A key saved before presets
+// Text and image models keep one key per connection preset: lines of "<preset id><tab><key>". A key saved before presets
 // (a line without a tab) belongs to the first preset, 'default'.
 export function parseTextKeys(value){const out=new Map();for(const line of String(value??'').split('\n')){if(!line.trim())continue;const at=line.indexOf('\t'),id=at<0?'default':line.slice(0,at).trim(),key=checkKey(cleanKey(at<0?line:line.slice(at+1)));if(/^[\w-]{1,64}$/.test(id)&&key)out.set(id,key);}return out;}
 export const joinTextKeys=map=>[...map].filter(([,key])=>key).map(([id,key])=>id+'\t'+key).join('\n');
 export function validateKey(engine,value){if(!engines.includes(engine))throw Error('引擎无效');
- if(engine==='llm')return joinTextKeys(parseTextKeys(value));
+ if(engine==='llm'||(['nai','gpt'].includes(engine)&&String(value??'').includes('\t')))return joinTextKeys(parseTextKeys(value));
  // Several keys come one per line (commas, semicolons and spaces also separate them); repeats are kept once, in order.
  if(MULTI_KEY.has(engine)){const keys=[...new Set(String(value??'').normalize('NFKC').split(/[\s,;，；、]+/).map(cleanKey).filter(part=>part&&!/^bearer$/i.test(part)))];if(keys.length>50)throw Error('最多填 50 个密钥');return keys.map(checkKey).join('\n');}
  return checkKey(cleanKey(value));}

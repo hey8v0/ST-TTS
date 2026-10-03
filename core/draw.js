@@ -276,8 +276,32 @@ export function normalizeVibeSettings(value) {
 }
 export function defaultDraw() {
   return {enabled: false, auto: true, guard: true, fold: false, mode: 'separate', strip: true, engine: 'nai', gpt: defaultGpt(), comfy: defaultComfy(),
+    connections: {nai: normalizeImageConnections('nai'), gpt: normalizeImageConnections('gpt')},
     queue: {gap: 3, retries: 4, cloud: {enabled: false, kind: 'room', url: '', room: ''}}, relay: {url: '', assumeOpus: false}, vibe: defaultVibe(), params: defaultDrawParams(),
     styles: [structuredClone(DEFAULT_STYLE)], activeStyle: 'default', presets: [structuredClone(DEFAULT_PRESET)], activePreset: 'default'};
+}
+
+/** Connection presets contain no secrets. Legacy single connections become the default preset. */
+export function normalizeImageConnections(engine, value, legacy = {}) {
+  const rows = Array.isArray(value?.presets) && value.presets.length ? value.presets : [{...legacy, id: 'default', name: '默认连接'}];
+  if (rows.length > 50) throw Error('每个生图引擎最多保存 50 组连接');
+  const ids = new Set();
+  const presets = rows.map(row => {
+    const id = String(row?.id || '');
+    if (!/^[\w-]{1,64}$/.test(id) || ids.has(id)) throw Error('生图连接编号无效或重复');
+    ids.add(id);
+    const name = String(row.name || '未命名连接').trim().slice(0, 60) || '未命名连接';
+    if (engine === 'gpt') { const g = normalizeGpt(row); return {id, name, url: g.url, model: g.model}; }
+    return {id, name, url: relayUrl(row.url, ''), assumeOpus: !!row.assumeOpus};
+  });
+  return {active: ids.has(value?.active) ? value.active : presets[0].id, presets};
+}
+
+/** Keep the existing drawing callers reading the selected connection's public fields. */
+export function applyImageConnection(draw, engine) {
+  const group = draw.connections[engine], p = group.presets.find(p => p.id === group.active);
+  if (engine === 'nai') draw.relay = {url: p.url, assumeOpus: p.assumeOpus};
+  else Object.assign(draw.gpt, {url: p.url, model: p.model});
 }
 
 const text = (value, max) => String(value ?? '').slice(0, max);
@@ -304,6 +328,14 @@ export function normalizeDraw(value) {
     cloud: {enabled: !!cloud.enabled, kind: cloud.kind === 'keyhash' ? 'keyhash' : 'room', url: text(cloud.url, 300).trim().replace(/\/+$/, ''), room: text(cloud.room, 80).trim()}};
   const relay = d.relay && typeof d.relay === 'object' ? d.relay : {};
   d.relay = {url: (() => { try { return relayUrl(relay.url, ''); } catch { return ''; } })(), assumeOpus: !!relay.assumeOpus};
+  d.connections = Object.fromEntries(['nai', 'gpt'].map(engine => [engine, normalizeImageConnections(engine, value.connections?.[engine], engine === 'nai' ? d.relay : d.gpt)]));
+  for (const engine of ['nai', 'gpt']) {
+    const group = d.connections[engine], p = group.presets.find(p => p.id === group.active);
+    // Existing settings editors still write these fields; they belong to the selected preset.
+    if (engine === 'nai' && value.relay) Object.assign(p, d.relay);
+    if (engine === 'gpt' && value.gpt) Object.assign(p, {url: d.gpt.url, model: d.gpt.model});
+    applyImageConnection(d, engine);
+  }
   d.vibe = normalizeVibeSettings(d.vibe);
   d.params = normalizeDrawParams(d.params);
   d.styles = (Array.isArray(d.styles) && d.styles.length ? d.styles : base.styles).map(s => ({id: String(s.id || crypto.randomUUID()), name: text(s.name, 60) || '画风', artist: text(s.artist, 4000), positive: text(s.positive, 4000), negative: text(s.negative, 4000)}));

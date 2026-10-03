@@ -1,0 +1,19 @@
+--- a/tests/moments.test.mjs
++++ b/tests/moments.test.mjs
+@@ -99 +99 @@
+-  if (key) backend.novelai.setKey('dummy-nai');
++  if (key) backend.setKey('nai', 'dummy-nai');
+--- a/tests/phone-ui.test.mjs
++++ b/tests/phone-ui.test.mjs
+@@ -45,2 +45,2 @@
+ test('engine pages expose every catalog field and save independent keys, parameters, and persistent reference audio',async()=>{
+- const f=await fixture();try{
++ const f=await fixture({api:()=>({voiceBalance:async()=>null})});try{
+@@ -51 +51 @@
+-  f.set('[data-field=key]','dummy-'+engine);f.click('[data-action=add-key]');assert.equal(f.api.keyStatus(engine),true);assert.equal(f.q('[data-field=key]').value,'');
++  f.set('[data-field=key]','dummy-'+engine);f.click('[data-action=add-key]');assert.equal(f.api.keyStatus(engine),true);assert.equal(f.q('[data-field=key]').value,'');await tick();
+--- a/scripts/check-phone-release.cjs
++++ b/scripts/check-phone-release.cjs
+@@ -7 +7 @@
+-const tests = ['core', 'role-persistence', 'dialogue-presentation', 'library', 'player-backend', 'provider-contract', 'backend', 'draw', 'queue', 'plan', 'chat', 'phone-ui', 'download', 'diagnostics', 'moments', 'call', 'llm', 'sync', 'compat', 'mimo', 'vibes', 'keystore', 'lore', 'stream', 'lan', 'apps', 'idb', 'image-engines', 'wallet'].map(name => `tests/${name}.test.mjs`);
++const tests = ['core', 'role-persistence', 'dialogue-presentation', 'library', 'player-backend', 'provider-contract', 'backend', 'draw', 'queue', 'plan', 'chat', 'phone-ui', 'download', 'diagnostics', 'moments', 'call', 'llm', 'sync', 'compat', 'mimo', 'vibes', 'keystore', 'lore', 'stream', 'lan', 'apps', 'idb', 'image-engines', 'image-connections', 'comfy-workflows', 'comfy-loras', 'comfy-draft', 'wallet'].map(name => `tests/${name}.test.mjs`);
